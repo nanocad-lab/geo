@@ -1,0 +1,4 @@
+# ninja log v5
+0	23937	1604447523853232749	/mnt/nfs_share/Project/sc/code_git/torch_c/sc-extension/build/temp.linux-x86_64-3.8/sc.o	858b455346387346
+0	17033	1604447543432166344	/mnt/nfs_share/Project/sc/code_git/torch_c/sc-extension/build/temp.linux-x86_64-3.8/sc_cuda.o	d78aa877edb8f0db
+1	34537	1604447560964129055	/mnt/nfs_share/Project/sc/code_git/torch_c/sc-extension/build/temp.linux-x86_64-3.8/sc_cuda_kernel.o	6ab7cddb064c717b

@@ -1,0 +1,20 @@
+ninja_required_version = 1.3
+cxx = c++
+
+cflags = -pthread -B /home/bizon/anaconda3/envs/pytorch/compiler_compat -Wl,--sysroot=/ -Wsign-compare -DNDEBUG -g -fwrapv -O3 -Wall -Wstrict-prototypes -fPIC -I/home/bizon/anaconda3/envs/pytorch/lib/python3.6/site-packages/torch/include -I/home/bizon/anaconda3/envs/pytorch/lib/python3.6/site-packages/torch/include/torch/csrc/api/include -I/home/bizon/anaconda3/envs/pytorch/lib/python3.6/site-packages/torch/include/TH -I/home/bizon/anaconda3/envs/pytorch/lib/python3.6/site-packages/torch/include/THC -I/home/bizon/anaconda3/envs/pytorch/include/python3.6m -c
+post_cflags = -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=lltm_cpp -D_GLIBCXX_USE_CXX11_ABI=0 -std=c++14
+ldflags = 
+
+rule compile
+  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags
+  depfile = $out.d
+  deps = gcc
+
+
+
+build /home/tianmu/project/sc/code_git/torch_c/lltm-extension/build/temp.linux-x86_64-3.6/lltm.o: compile /home/tianmu/project/sc/code_git/torch_c/lltm-extension/lltm.cpp
+
+
+
+
+

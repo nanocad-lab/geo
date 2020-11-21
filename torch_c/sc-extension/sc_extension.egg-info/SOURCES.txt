@@ -1,0 +1,6 @@
+sc.cpp
+setup.py
+sc_extension.egg-info/PKG-INFO
+sc_extension.egg-info/SOURCES.txt
+sc_extension.egg-info/dependency_links.txt
+sc_extension.egg-info/top_level.txt

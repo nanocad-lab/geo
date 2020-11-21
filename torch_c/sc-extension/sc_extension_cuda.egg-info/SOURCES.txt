@@ -1,0 +1,8 @@
+sc_cuda.cpp
+sc_cuda_kernel.cu
+setup.py
+setup_cuda.py
+sc_extension_cuda.egg-info/PKG-INFO
+sc_extension_cuda.egg-info/SOURCES.txt
+sc_extension_cuda.egg-info/dependency_links.txt
+sc_extension_cuda.egg-info/top_level.txt
