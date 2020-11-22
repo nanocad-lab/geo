@@ -1,3 +1,0 @@
-/mnt/usb/torch_c/test_sc/build/CMakeFiles/edit_cache.dir
-/mnt/usb/torch_c/test_sc/build/CMakeFiles/rebuild_cache.dir
-/mnt/usb/torch_c/test_sc/build/CMakeFiles/sc.dir
