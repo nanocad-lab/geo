@@ -213,6 +213,7 @@ def main():
             
     for param in param_copy:
         param.requires_grad = True
+        pass
         
     if optim_choice=='Adam':
         optimizer = optim.Adam(param_copy, lr=lr, weight_decay=0)
