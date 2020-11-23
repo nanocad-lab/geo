@@ -5,7 +5,6 @@ import torchvision
 import torchvision.transforms as transforms
 
 import numpy as np
-from torch.autograd import Variable
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -14,10 +13,6 @@ import utils_own
 import network
 
 import torch.optim as optim
-
-import copy
-import time
-#import adabound
 
 parser = argparse.ArgumentParser(description='PyTorch small CNN Training for SC Darpa')
 
@@ -35,7 +30,6 @@ parser.add_argument('--load_wait_w', metavar='LWAITW', default='1244', type=str,
 parser.add_argument('--load_wait_a', metavar='LWAITA', default='5555', type=str, help='Number of cycles to wait between loads (activation)')
 parser.add_argument('-b','--batch', metavar='BATCH', default=256, type=int, help='Batch size to use')
 parser.add_argument('--size', metavar='SIZE', default=0, type=int, help='Size of network to use')
-parser.add_argument('-e','--epoch', metavar='EPOCH', default=1000, type=int, help='Number of epochs to train')
 parser.add_argument('--prec', metavar='PRECISION', default='7777', type=str, help='Precision of weight/activation to use')
 parser.add_argument('--val', metavar='VAL', default=0, type=int, help='Evaluate a pretrained model')
 parser.add_argument('--mult_pass', metavar='MULTI_PASS', default=0, type=int, help='Whether or not to train for multi-pass')
@@ -45,9 +39,6 @@ parser.add_argument('--compute', metavar='COMP', default='1d_bin', type=str, hel
 parser.add_argument('--legacy', metavar='LEGACY', default=0, type=int, help='Use legacy computation')
 parser.add_argument('--monitor', metavar='MONITOR', default=0, type=int, help='Monitor computation')
 parser.add_argument('--relu', metavar='RELU', default=0, type=int, help='Use relu before pooling')
-
-__imagenet_stats = {'mean': [0.485, 0.456, 0.406],
-                   'std': [0.229, 0.224, 0.225]}
 
 def main():
     global args, best_prec1
@@ -79,7 +70,6 @@ def main():
         load_wait_as.append(int(load_wait_a[i]))
     
     b = args.batch
-    e = args.epoch
     
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -246,7 +236,7 @@ def main():
             trainloader, net, criterion, epoch, optimizer, param_copy=param_copy, modules=model, monitor=monitor)
         # evaluate on validation set
         val_loss, val_prec1, val_prec5 = utils_own.validate(
-            testloader, net, criterion, epoch, verbal=True, target=use_target, monitor=monitor)
+            testloader, net, criterion, epoch, verbal=True, monitor=monitor)
         # net.add_or = add_or
         # remember best prec@1 and save checkpoint
         is_best = val_prec1 > best_prec1
