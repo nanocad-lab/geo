@@ -13,8 +13,13 @@ import utils_own
 import network
 
 import torch.optim as optim
+'''
+File controlling the overall training and validation procedure
+Default parameters train a 4-layer CNN using LFSR generator with 128-bit stream length for all layers. Accumulation is done using OR for x and z dimensions of the filter, while y dimension is accumulated using fixed-point adders.
+E.g.: for a 32x5x5 filter, the "32" and the first "5" dimension are accumulated using OR, and the last "5" dimension is accumulated using fixed-point adders, so only 4 integer additions is needed.
+'''
 
-parser = argparse.ArgumentParser(description='PyTorch small CNN Training for SC Darpa')
+parser = argparse.ArgumentParser(description='PyTorch small CNN Training for SC')
 
 parser.add_argument('--save_dir', metavar='SAVE_DIR', default='./training_data_sc/cifar_mid/', type=str, help='save dir')
 parser.add_argument('--dataset', metavar='DATASET', default='CIFAR10', type=str, help='dataset to use')
@@ -27,10 +32,9 @@ parser.add_argument('--z_unit', metavar='ZUNIT', default='3344', type=str, help=
 parser.add_argument('--load_unit', metavar='LUNIT', default='2222', type=str, help='Number of bits to load each time')
 parser.add_argument('--load_wait', metavar='LWAIT', default='2222', type=str, help='Number of cycles to wait between loads')
 parser.add_argument('-b','--batch', metavar='BATCH', default=256, type=int, help='Batch size to use')
-parser.add_argument('--size', metavar='SIZE', default=0, type=int, help='Size of network to use')
+parser.add_argument('--size', metavar='SIZE', default=0, type=int, help='Size of network to use. Setting 1 uses VGG-16, while default 0 uses a small 4-layer CNN for SVHN and CIFAR-10, and a smaller one for MNIST')
 parser.add_argument('--prec', metavar='PRECISION', default='7777', type=str, help='Precision of weight/activation to use')
 parser.add_argument('--val', metavar='VAL', default=0, type=int, help='Evaluate a pretrained model')
-parser.add_argument('--mult_pass', metavar='MULTI_PASS', default=0, type=int, help='Whether or not to train for multi-pass')
 parser.add_argument('--uniform', metavar='UNIFORM', default=0, type=int, help='Uniform initialization')
 parser.add_argument('--generator', metavar='GEN', default='lfsr', type=str, help='Generator to use')
 parser.add_argument('--compute', metavar='COMP', default='1d_bin', type=str, help='SC computation to use')
@@ -52,6 +56,12 @@ def main():
     load_unit = args.load_unit
     load_wait = args.load_wait
     
+    # err, prec, z_unit, load_unit, load_wait are expressed using a string of ints, each representing the value for one
+    # layer or a group of layers in the case of VGG-16.
+    # Err is used to calculate stream length for each layer. For example, '5557' means stream length is 2**5=32, 2**5=32,
+    # 2**5=32, 2**7=128 for each layer
+    # Prec is used to specify weight/activation precision. Since stream length directly actual precision, this doesn't 
+    # need to be adjusted in general
     errs = []
     precs = []
     z_units = []
@@ -66,6 +76,7 @@ def main():
     
     b = args.batch
     
+    # Setting seed allows reproducible results
     torch.manual_seed(seed)
     np.random.seed(seed)
     torch.backends.cudnn.deterministic=True
@@ -106,7 +117,7 @@ def main():
             net = network.CONV_tiny_add_partial(uniform=uniform, sc_compute=compute, generator=generator, legacy=legacy, relu=relu)
             layers = 4
         elif args.size==1:
-            net = network.VGG16_add_partial(uniform=uniform, sc_compute=compute, generator=generator, legacy=legacy, half_pool=half_pool)
+            net = network.VGG16_add_partial(uniform=uniform, sc_compute=compute, generator=generator, legacy=legacy)
             layers = 6
         if layers != len(err):
             print('Mismatch')
@@ -123,7 +134,7 @@ def main():
             net = network.CONV_tiny_add_partial(uniform=uniform, sc_compute=compute, generator=generator, legacy=legacy, relu=relu)
             layers = 4
         elif args.size==1:
-            net = network.VGG16_add_partial(uniform=uniform, sc_compute=compute, generator=generator, legacy=legacy, half_pool=half_pool)
+            net = network.VGG16_add_partial(uniform=uniform, sc_compute=compute, generator=generator, legacy=legacy)
             layers = 6
         if layers != len(err):
             print('Mismatch')
@@ -145,12 +156,14 @@ def main():
         net = network.CONV_minimal_add_partial(uniform=uniform, sc_compute=compute, generator=generator, legacy=legacy)
         errs = 4
 
+    # Default save directory is one level up in the hierarchy
     save_dir = os.path.join('../', args.save_dir)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
     save_file = os.path.join(save_dir, 'CONV_small')
 
+    # Prevents overwriting logging files if already exists
     if not val:
         setup_logging(save_file + '_log.txt')
         logging.info("saving to %s", save_file)
@@ -161,6 +174,7 @@ def main():
     
     torch.cuda.empty_cache()
     
+    # Set model paramters
     net.prec = precs
     net.err = errs
     net.z_unit = z_units
@@ -178,8 +192,13 @@ def main():
     
     criterion = nn.CrossEntropyLoss()
 
+    # model specifies the parameters to train on. Since all parameters are trained here, there is no difference between
+    # model and net
     model = net
 
+    # device >=0 specifies a GPU
+    # This parameter copy is mainly for training with half precision. This functionality is disabled here due to the 
+    # limited scaling and instability of half precision training.
     if device>=0:
         param_copy = [param.clone().cuda(device).float().detach() for param in model.parameters()]
     else:
@@ -188,7 +207,8 @@ def main():
     for param in param_copy:
         param.requires_grad = True
         pass
-        
+    
+    # Switches between different optimizers
     if optim_choice=='Adam':
         optimizer = optim.Adam(param_copy, lr=lr, weight_decay=0)
     elif optim_choice=='RMSprop':
@@ -198,6 +218,7 @@ def main():
     if optim_choice=='Adabound':
         optimizer = adabound.AdaBound(param_copy, lr=lr, final_lr=0.1)
     
+    # Learning rate scheduler that anneals learning rate if loss fails decrease for some epochs
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, factor=0.3, patience=150, verbose=True, threshold=0.05)
     
     best_prec1 = 0
@@ -205,10 +226,12 @@ def main():
     val_prec1 = 0
     
     if val:
+        # Validate accuracy without training
         val_loss, val_prec1, val_prec5 = utils_own.validate(
             testloader, net, criterion, 0, verbal=True, monitor=monitor)
         return 0
     else:
+        # Prevents overwriting existing save files
         if os.path.exists(save_file):
             print("Save file already exists. Delete manually if want to overwrite")
             return 0

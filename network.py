@@ -4,14 +4,19 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import utils_class
-    
-def conv3(in_plane, out_plane):
-    return utils_class.Conv2d_Add_Partial(in_plane, out_plane, kernel_size=3, padding=1, bias=False)
-def conv5(in_plane, out_plane):
-    return utils_class.Conv2d_Add_Partial(in_plane, out_plane, kernel_size=5, padding=2, bias=False)
+
+'''
+File containing all model definitions
+'''
     
 class VGG16_add_partial(nn.Module):
-    def __init__(self, uniform=False, sc_compute='1d_bin', generator='lfsr', legacy=False, half_pool=False):
+    '''
+    VGG16 modified for SC
+    Stream length (err)/load unit/load wait values are specified using a string of 6 integers. Pooling layers automatically use half the stream length. Stream length = 2**{value specified}
+    The first value is used for the layer1-2, second for layer3-4, third for layer5-7, fourth for layer8-10, fifth for layer11-13, sixth for FC layers
+    E.g.: to achieve load unit=2, load wait=2, stream length=64 for all layers without pooling and 32 for all layers with pooling, err=[666666], load_unit=[222222], load_wait=[222222]
+    '''
+    def __init__(self, uniform=False, sc_compute='1d_bin', generator='lfsr', legacy=False, half_pool=True):
         super(VGG16_add_partial, self).__init__()
         self.conv1 = utils_class.Conv2d_Add_Partial(3, 64, kernel_size=3, padding=1, bias=False)
         self.conv2 = utils_class.Conv2d_Add_Partial(64, 64, kernel_size=3, padding=1, bias=False)
@@ -58,6 +63,7 @@ class VGG16_add_partial(nn.Module):
         self.legacy = legacy
         self.half_pool = half_pool
         
+        # Scale up weights for low precision and stream length. Other underflow prevents effective training
         if np.min(self.err)<4:
             uniform=True
         if uniform:
@@ -113,10 +119,16 @@ class VGG16_add_partial(nn.Module):
         
         x = self.fc1(x, err=self.err[5], forward=self.compute, generator=self.generator, z_unit=2**self.z_unit[5], legacy=self.legacy, load_unit=self.load_unit[5], load_wait_w=self.load_wait[5], load_wait_a=self.load_wait[5])
         x = x.view(-1,10)
+        # BN at the output stabilizes training
         x = self.bnfc1(x)
         return x
     
 class CONV_tiny_add_partial(nn.Module):
+    '''
+    4-layer CNN for SC
+    Stream length (err)/load unit/load wait values are specified using a string of 4 integers, one for each layer.
+    E.g.: to achieve load unit=2, load wait=2, stream length=32 for all conv layers 128 for the last fc layer, err=[5557], load_unit=[2222], load_wait=[2222]
+    '''
     def __init__(self, num_classes=10, c_ins=3, uniform=False, generator='lfsr', sc_compute='1d_bin', legacy=False, relu=False):
         super(CONV_tiny_add_partial, self).__init__()
         self.bn1 = utils_class.BatchNorm2d_fixed(32)
@@ -141,6 +153,8 @@ class CONV_tiny_add_partial(nn.Module):
         self.compute = sc_compute
         self.legacy = legacy
         self.relu = relu
+        
+        # Scale up weights for low precision and stream length. Other underflow prevents effective training
         if uniform:
             self.conv1.weight_org *= 2
             self.conv2.weight_org *= 2
@@ -171,10 +185,15 @@ class CONV_tiny_add_partial(nn.Module):
 
         x = self.fc1(x, err=self.err[3], forward=self.compute, generator=self.generator, z_unit=2**self.z_unit[3], legacy=self.legacy, load_unit=self.load_unit[3], load_wait_w=self.load_wait[2], load_wait_a=self.load_wait[3])
         x = x.view(-1, self.num_classes)
+        # BN at the output stabilizes training
         x = self.bn4(x)
         return x
     
 class CONV_minimal_add_partial(nn.Module):
+    '''
+    LeNet CNN for SC
+    Stream length of 32 is used for all layers, due the simplicity of MNIST this model is aimed toward
+    '''
     def __init__(self, uniform=False, legacy=False, generator='lfsr', sc_compute='1d_bin'):
         super(CONV_minimal_add_partial, self).__init__()
         self.bn1 = utils_class.BatchNorm2d_fixed(6)
