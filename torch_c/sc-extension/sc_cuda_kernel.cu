@@ -7,7 +7,7 @@
 
 #define BLOCK_INPUT 16
 #define BLOCK_WEIGHT 64
-#define BATCH_SIZE 34
+#define BATCH_SIZE 128
 #define SHARE_SIZE 96
 
 __device__ __forceinline__ int d_lfsr_8(int value) {

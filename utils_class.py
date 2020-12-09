@@ -5,11 +5,6 @@ import torch.nn.functional as F
 
 import utils_functional
 
-def quantize(input, prec=8):
-    prec_2 = 2**prec
-    input = (input * prec_2).round().clamp(-prec_2+1, prec_2-1)/prec_2
-    return input
-
 class Conv2d_Add_Partial(nn.Conv2d):
     '''
     SC Conv2d using partial binary add
@@ -19,8 +14,8 @@ class Conv2d_Add_Partial(nn.Conv2d):
         self.register_buffer('weight_org', self.weight.data.clone())
     
     def forward(self, input, prec=7, err=7, bn=nn.Identity(), forward='1d_bin', generator='lfsr', z_unit=8, legacy=False, load_unit=8, load_wait_w=2, load_wait_a=2):
-        input.data = quantize(input.data, prec=prec)
-        self.weight.data = quantize(self.weight_org, prec=prec)
+        input.data = utils_functional.quantize(input.data, prec=prec)
+        self.weight.data = utils_functional.quantize(self.weight_org, prec=prec)
         out = utils_functional.conv2d_generic(input, self.weight, bit_length=2**err, padding=self.padding, stride=self.stride, forward=forward, generator=generator, bn=bn, legacy=legacy, z_unit=z_unit, load_unit=load_unit, load_wait_w=load_wait_w, load_wait_a=load_wait_a)
         return out
 

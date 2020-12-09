@@ -112,7 +112,7 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
                         
         batch_time.update(time.time() - end)
         end = time.time()
-        if verbal:
+        if monitor:
             print('Epoch: [{0}][{1}/{2}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.6f})\t'
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'

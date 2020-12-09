@@ -18,11 +18,25 @@ prec_default = 7
 '''
 Helper functions
 '''
-def quantize(input, quant=False, prec=8):
+def quantize(input, prec=8):
     prec_2 = 2**prec
-    if quant:
-        input = (input * prec_2).round().clamp(-prec_2, prec_2-1)/prec_2
+    input = (input * prec_2).round().clamp(-prec_2+1, prec_2-1)/prec_2
     return input
+
+def quantize_shift(tensor, scale=None, scale_only=False):
+    if scale_only:
+        scale = torch.mean(tensor)*2
+        scale = 2**torch.ceil(torch.log2(scale))
+        tensor_quant = torch.ones_like(tensor)*scale
+        return tensor_quant, scale
+    else:
+        if scale is None:
+            scale = torch.mean(tensor)*3
+            scale = 2**torch.ceil(torch.log2(scale))
+        tensor_quant = tensor / scale
+        tensor_quant = (tensor_quant * 128).round().clamp(-127, 127)/128
+        tensor_quant = tensor_quant * scale
+        return tensor_quant, scale  
 
 '''
 Generator functions
@@ -228,7 +242,7 @@ def linear_generic(activation, weight, **kwargs):
     try:
         share = kwargs['share']
     except:
-        share = global_share
+        share = True
         
     try:
         bypass = kwargs['bypass']
@@ -324,7 +338,7 @@ def conv2d_generic(activation, weight, padding, stride, **kwargs):
     try:
         share = kwargs['share']
     except:
-        share = global_share
+        share = True
         
     try:
         bypass = kwargs['bypass']
@@ -384,7 +398,7 @@ def conv2d_generic(activation, weight, padding, stride, **kwargs):
     '''
     Change the name of functions to make them more reasonable
     '''
-    if (forward=='1d_bin') (not legacy):
+    if (forward=='1d_bin') and (not legacy):
         if generator=='lfsr':
             if not activation.is_cuda:
                 activation = F.pad(activation, (padding[0], padding[0], padding[1], padding[1]))
@@ -392,7 +406,7 @@ def conv2d_generic(activation, weight, padding, stride, **kwargs):
                 result_neg = torch.zeros_like(result_pos)
             else:
                 activation = F.pad(activation, (padding[0], padding[0], padding[1], padding[1]))
-                result_pos = sc_extension_cuda.conv2d_add_partial_variable_acc(activation.data, weight.data, bit_length, (0,0), stride, prec_default, load_unit, load_wait, False, 2).float()
+                result_pos = sc_extension_cuda.conv2d_add_partial_variable_acc(activation.data, weight.data, bit_length, (0,0), stride, prec_default, load_unit, load_wait_w, False, 2).float()
                 result_neg = torch.zeros_like(result_pos)
         elif generator=='acc':
             activation = F.pad(activation, (padding[0], padding[0], padding[1], padding[1]))
@@ -400,7 +414,7 @@ def conv2d_generic(activation, weight, padding, stride, **kwargs):
             result_neg = torch.zeros_like(result_pos)
     elif (forward=='z_bin') and (activation.is_cuda) and (not legacy):
         activation = F.pad(activation, (padding[0], padding[0], padding[1], padding[1]))
-        result_pos = sc_extension_cuda.conv2d_add_partial_variable_acc(activation.data, weight.data, bit_length, (0,0), stride, prec_default, load_unit, load_wait, False, 0).float()
+        result_pos = sc_extension_cuda.conv2d_add_partial_variable_acc(activation.data, weight.data, bit_length, (0,0), stride, prec_default, load_unit, load_wait_w, False, 0).float()
         result_neg = torch.zeros_like(result_pos)
     elif (forward=='yz_bin') and (activation.is_cuda) and (not legacy):
         activation = F.pad(activation, (padding[0], padding[0], padding[1], padding[1]))
@@ -452,59 +466,59 @@ def conv2d_generic(activation, weight, padding, stride, **kwargs):
                 w_neg_split_temp.append(w_neg_split[...,m:m+1])
             w_pos_split = torch.cat(w_pos_split_temp, 0)
             w_neg_split = torch.cat(w_neg_split_temp, 0)
+            
+        if share:
+            if global_share_more:
+                a_size = list(activation.size()[-1:])
+                w_size = list(w_pos_split.size()[-1:])
+            elif global_share_max:
+                a_size = [1]
+                w_size = [1]
+            else:
+                a_size = list(activation.size()[-3:])
+                w_size = list(w_pos_split.size()[-3:])
         else:
-            if share:
-                if global_share_more:
-                    a_size = list(activation.size()[-1:])
-                    w_size = list(w_pos_split.size()[-1:])
-                elif global_share_max:
-                    a_size = [1]
-                    w_size = [1]
-                else:
-                    a_size = list(activation.size()[-3:])
-                    w_size = list(w_pos_split.size()[-3:])
+            a_size = activation.size()
+            w_size = w_pos_split.size()
+
+        if generator=='lfsr':
+            rand_input, rand_weight_pos, rand_weight_neg = lfsr_init(w_size, a_size, device, prec)
+        elif generator=='acc':
+            input_cur, weight_pos_cur, weight_neg_cur = acc_init(w_pos_split, w_neg_split, input_split)
+        else:
+            rand_input, rand_weight_pos, rand_weight_neg = rand_init(w_size, a_size, device, prec)
+
+        for k in range(bit_length):
+            if generator=='acc':
+                a_bit, w_pos_bit, w_neg_bit, input_cur, weight_pos_cur, weight_neg_cur = acc_cont(input_cur, weight_pos_cur, weight_neg_cur, device, k, prec)
             else:
-                a_size = activation.size()
-                w_size = w_pos_split.size()
-
-            if generator=='lfsr':
-                rand_input, rand_weight_pos, rand_weight_neg = lfsr_init(w_size, a_size, device, prec)
-            elif generator=='acc':
-                input_cur, weight_pos_cur, weight_neg_cur = acc_init(w_pos_split, w_neg_split, input_split)
-            else:
-                rand_input, rand_weight_pos, rand_weight_neg = rand_init(w_size, a_size, device, prec)
-
-            for k in range(bit_length):
-                if generator=='acc':
-                    a_bit, w_pos_bit, w_neg_bit, input_cur, weight_pos_cur, weight_neg_cur = acc_cont(input_cur, weight_pos_cur, weight_neg_cur, device, k, prec)
+                if generator=='lfsr':
+                    rand_input, rand_weight_pos, rand_weight_neg = lfsr_cont(rand_input, rand_weight_pos, rand_weight_neg, bit_length=bit_length)
                 else:
-                    if generator=='lfsr':
-                        rand_input, rand_weight_pos, rand_weight_neg = lfsr_cont(rand_input, rand_weight_pos, rand_weight_neg, bit_length=bit_length)
-                    else:
-                        rand_input, rand_weight_pos, rand_weight_neg = rand_init(w_size, a_size, device, prec)
-                    w_pos_bit = (w_pos_split > rand_weight_pos).to(compute_type)
-                    w_neg_bit = (w_neg_split > rand_weight_neg).to(compute_type)
-                    a_bit = (input_split > rand_input).to(compute_type)
+                    rand_input, rand_weight_pos, rand_weight_neg = rand_init(w_size, a_size, device, prec)
+                w_pos_bit = (w_pos_split > rand_weight_pos).to(compute_type)
+                w_neg_bit = (w_neg_split > rand_weight_neg).to(compute_type)
+                a_bit = (input_split > rand_input).to(compute_type)
 
-                result_pos_temp = F.conv2d(a_bit, w_pos_bit, stride=stride)
-                result_neg_temp = F.conv2d(a_bit, w_neg_bit, stride=stride)
-                if not forward=='full_bin':
-                    result_pos_temp = result_pos_temp.sign()
-                    result_neg_temp = result_neg_temp.sign()
+            result_pos_temp = F.conv2d(a_bit, w_pos_bit, stride=stride)
+            result_neg_temp = F.conv2d(a_bit, w_neg_bit, stride=stride)
+            if not forward=='full_bin':
+                result_pos_temp = result_pos_temp.sign()
+                result_neg_temp = result_neg_temp.sign()
 
-                if forward == '1d_bin':
+            if forward == '1d_bin':
+                for m in range(f_y):
+                    result_pos = result_pos + result_pos_temp[:,m*cout:(m+1)*cout,...,m:i_y-f_y+m+1]
+                    result_neg = result_neg + result_neg_temp[:,m*cout:(m+1)*cout,...,m:i_y-f_y+m+1]
+            elif forward == '2d_bin':
+                for l in range(f_x):
                     for m in range(f_y):
-                        result_pos = result_pos + result_pos_temp[:,m*cout:(m+1)*cout,...,m:i_y-f_y+m+1]
-                        result_neg = result_neg + result_neg_temp[:,m*cout:(m+1)*cout,...,m:i_y-f_y+m+1]
-                elif forward == '2d_bin':
-                    for l in range(f_x):
-                        for m in range(f_y):
-                            index = l*f_y + m
-                            result_pos = result_pos + result_pos_temp[:,index*cout:(index+1)*cout, l:i_x-f_x+l+1, m:i_y-f_y+m+1] 
-                            result_neg = result_neg + result_neg_temp[:,index*cout:(index+1)*cout, l:i_x-f_x+l+1, m:i_y-f_y+m+1]
-                elif (forward=='full_or') or (forward=='full_bin'):
-                    result_pos = result_pos + result_pos_temp
-                    result_neg = result_neg + result_neg_temp
+                        index = l*f_y + m
+                        result_pos = result_pos + result_pos_temp[:,index*cout:(index+1)*cout, l:i_x-f_x+l+1, m:i_y-f_y+m+1] 
+                        result_neg = result_neg + result_neg_temp[:,index*cout:(index+1)*cout, l:i_x-f_x+l+1, m:i_y-f_y+m+1]
+            elif (forward=='full_or') or (forward=='full_bin'):
+                result_pos = result_pos + result_pos_temp
+                result_neg = result_neg + result_neg_temp
                                 
     w_pos = weight.clamp(0,100)
     w_neg = -(weight.clamp(-100,0))

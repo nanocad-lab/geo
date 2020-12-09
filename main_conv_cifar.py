@@ -19,15 +19,13 @@ parser = argparse.ArgumentParser(description='PyTorch small CNN Training for SC 
 parser.add_argument('--save_dir', metavar='SAVE_DIR', default='./training_data_sc/cifar_mid/', type=str, help='save dir')
 parser.add_argument('--dataset', metavar='DATASET', default='CIFAR10', type=str, help='dataset to use')
 parser.add_argument('--seed', metavar='SEED', default=0, type=int, help='seed to used for this run')
-parser.add_argument('--max_pool', metavar='MAX_POOL', default=0, type=int, help='use maxpool. Use avgpool if 0')
 parser.add_argument('--device', metavar='DEVICE', default=0, type=int, help='the device to use')
 parser.add_argument('--optim', metavar='OPTIM', default='Adam', type=str, help='optimizer to use')
 parser.add_argument('--lr', metavar='LR', default=2e-3, type=float, help='leaning rate to use')
 parser.add_argument('--err', metavar='ERR', default='7777', type=str, help='Err precision per layer')
 parser.add_argument('--z_unit', metavar='ZUNIT', default='3344', type=str, help='z accumulation unit per layer')
 parser.add_argument('--load_unit', metavar='LUNIT', default='2222', type=str, help='Number of bits to load each time')
-parser.add_argument('--load_wait_w', metavar='LWAITW', default='1244', type=str, help='Number of cycles to wait between loads (weight)')
-parser.add_argument('--load_wait_a', metavar='LWAITA', default='5555', type=str, help='Number of cycles to wait between loads (activation)')
+parser.add_argument('--load_wait', metavar='LWAIT', default='2222', type=str, help='Number of cycles to wait between loads')
 parser.add_argument('-b','--batch', metavar='BATCH', default=256, type=int, help='Batch size to use')
 parser.add_argument('--size', metavar='SIZE', default=0, type=int, help='Size of network to use')
 parser.add_argument('--prec', metavar='PRECISION', default='7777', type=str, help='Precision of weight/activation to use')
@@ -52,22 +50,19 @@ def main():
     generator = args.generator
     compute = args.compute
     load_unit = args.load_unit
-    load_wait_w = args.load_wait_w
-    load_wait_a = args.load_wait_a
+    load_wait = args.load_wait
     
     errs = []
     precs = []
     z_units = []
     load_units = []
-    load_wait_ws = []
-    load_wait_as = []
+    load_waits = []
     for i in range(len(err)):
         errs.append(int(err[i]))
         precs.append(int(prec[i]))   
         z_units.append(int(z_unit[i]))
         load_units.append(int(load_unit[i]))
-        load_wait_ws.append(int(load_wait_w[i]))
-        load_wait_as.append(int(load_wait_a[i]))
+        load_waits.append(int(load_wait[i]))
     
     b = args.batch
     
@@ -75,10 +70,6 @@ def main():
     np.random.seed(seed)
     torch.backends.cudnn.deterministic=True
 
-    if args.max_pool == 1:
-        max_pool = True
-    else:
-        max_pool = False
     if args.val == 1:
         val = True
     else:
@@ -103,9 +94,6 @@ def main():
     device = args.device
     dataset = args.dataset
     
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std =[0.229, 0.224, 0.225])
-    
     if dataset=='CIFAR10':
         trainset = torchvision.datasets.CIFAR10(root='../data', train=True, download=True,
                                                 transform=transforms.Compose([transforms.RandomCrop(32, 4),
@@ -117,12 +105,10 @@ def main():
         if args.size==0:
             net = network.CONV_tiny_add_partial(uniform=uniform, sc_compute=compute, generator=generator, legacy=legacy, relu=relu)
             layers = 4
-#             net = network.ResNet18()
-        if args.size==1:
+        elif args.size==1:
             net = network.VGG16_add_partial(uniform=uniform, sc_compute=compute, generator=generator, legacy=legacy, half_pool=half_pool)
             layers = 6
         if layers != len(err):
-            print(layers, err, len(err))
             print('Mismatch')
             return -1
         
@@ -136,7 +122,7 @@ def main():
         if args.size==0:
             net = network.CONV_tiny_add_partial(uniform=uniform, sc_compute=compute, generator=generator, legacy=legacy, relu=relu)
             layers = 4
-        if args.size==1:
+        elif args.size==1:
             net = network.VGG16_add_partial(uniform=uniform, sc_compute=compute, generator=generator, legacy=legacy, half_pool=half_pool)
             layers = 6
         if layers != len(err):
@@ -168,7 +154,6 @@ def main():
     if not val:
         setup_logging(save_file + '_log.txt')
         logging.info("saving to %s", save_file)
-#         lr /= 100
     
     result_dic = save_file + '_result.pt'
     
@@ -180,8 +165,7 @@ def main():
     net.err = errs
     net.z_unit = z_units
     net.load_unit = load_units
-    net.load_wait_w = load_wait_ws
-    net.load_wait_a = load_wait_as
+    net.load_wait = load_waits
     if device<0:
         pass
     else:
