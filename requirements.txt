@@ -1,0 +1,8 @@
+# This file may be used to create an environment using:
+# $ conda create --name <env> --file <this file>
+# platform: linux-64
+bokeh=2.2.0=py38_0
+pandas=1.1.1=py38he6710b0_0
+python=3.8.5=hcff3b4d_0
+pytorch=1.6.0=py3.8_cuda10.2.89_cudnn7.6.5_0
+torchvision=0.7.0=py38_cu102

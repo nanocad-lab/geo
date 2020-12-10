@@ -2,8 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 import utils_functional
+
+'''
+Custom layers for SC
+'''
 
 class Conv2d_Add_Partial(nn.Conv2d):
     '''
@@ -13,13 +16,28 @@ class Conv2d_Add_Partial(nn.Conv2d):
         super(Conv2d_Add_Partial, self).__init__(*kargs, **kwargs)
         self.register_buffer('weight_org', self.weight.data.clone())
     
-    def forward(self, input, prec=7, err=7, bn=nn.Identity(), forward='1d_bin', generator='lfsr', z_unit=8, legacy=False, load_unit=8, load_wait_w=2, load_wait_a=2):
+    def forward(self, input, prec=7, err=7, forward='1d_bin', generator='lfsr', z_unit=8, legacy=False, load_unit=8, load_wait_w=2, load_wait_a=2):
+        '''
+        Arguments:
+        prec: weight and activation precision to quantize to
+        err: stream length in the form of 2**err
+        forward: sc compute. Specifically how accumulation is done
+        generator: stream generator
+        z_unit: number of input channles to sum using OR accumulation when forward==yz_bin
+        legacy: disable accelerated kernels
+        load_unit: number of bits to load each time for progressive loading
+        load_wait_w: number of cycles to wait between loading weights for progressive loading
+        load_wait_a: number of cycles to wait between loading activations for progressive loading
+        '''
         input.data = utils_functional.quantize(input.data, prec=prec)
         self.weight.data = utils_functional.quantize(self.weight_org, prec=prec)
-        out = utils_functional.conv2d_generic(input, self.weight, bit_length=2**err, padding=self.padding, stride=self.stride, forward=forward, generator=generator, bn=bn, legacy=legacy, z_unit=z_unit, load_unit=load_unit, load_wait_w=load_wait_w, load_wait_a=load_wait_a)
+        out = utils_functional.conv2d_generic(input, self.weight, bit_length=2**err, padding=self.padding, stride=self.stride, forward=forward, generator=generator, legacy=legacy, z_unit=z_unit, load_unit=load_unit, load_wait_w=load_wait_w, load_wait_a=load_wait_a)
         return out
 
 class BatchNorm2d_fixed(nn.BatchNorm2d):
+    '''
+    Quantized 2d batchnorm
+    '''
     def __init__(self, *kargs, **kwargs):
         super(BatchNorm2d_fixed, self).__init__(*kargs, **kwargs)
         self.register_buffer('scale', None)
@@ -47,6 +65,9 @@ class BatchNorm2d_fixed(nn.BatchNorm2d):
         return out
     
 class BatchNorm1d_fixed(nn.BatchNorm1d):
+    '''
+    Quantized 1d batchnorm
+    '''
     def __init__(self, *kargs, **kwargs):
         super(BatchNorm1d_fixed, self).__init__(*kargs, **kwargs)
         self.register_buffer('scale', None)

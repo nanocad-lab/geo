@@ -5,11 +5,16 @@
 #include <curand_kernel.h>
 #include <cuda_runtime.h>
 
+/*
+ * Accelerated GPU implementation. Kernel functions
+ */
+
 #define BLOCK_INPUT 16
 #define BLOCK_WEIGHT 64
 #define BATCH_SIZE 128
 #define SHARE_SIZE 96
 
+// LFSR functions
 __device__ __forceinline__ int d_lfsr_8(int value) {
     return ((value/128)+(value/32)%2+(value/16)%2+(value/8)%2)%2+2*(value%128);
 }
@@ -34,6 +39,7 @@ __device__ __forceinline__ int d_lfsr_3(int value) {
     return ((value/4)+(value/2)%2)%2+2*(value%4);
 }
 
+// Matrix multiplicatiohn with partial binary accumulation
 __device__ __forceinline__ void matmul_outer(
         const int32_t* __restrict__ input_point,
         const int32_t* __restrict__ weight_pos_stream,
@@ -51,6 +57,10 @@ __device__ __forceinline__ void matmul_outer(
         int i_point_batch_offset,
         int o_batch_offset,
         int o_cout_step) {
+	/*
+	 * Accumulation in pw is performed using fixed-point adders
+	 * Computation performed on a grid of i_kernel_size x w_kernel_size
+	 */
     for(int pw=0; pw<pws; pw++) {
         int i_point_pw_offset = pw * i_pw_step;
         int w_pw_offset = pw * w_pw_step;
@@ -75,6 +85,9 @@ __device__ __forceinline__ void matmul_outer(
     }
 }
 
+// Weight generation and transpose for y-dimension fixed-point accumulation using LFSR
+// Transpose from (c_out, c_in, w, h) to (pack*h, c_in*w, c_out)
+// pack = (stream length + 31) / 32
 __global__
 void stream_generation_transpose_add_variable(
         const int32_t* __restrict__ weight_pos,
@@ -156,6 +169,10 @@ void stream_generation_transpose_add_variable(
     }
 }
 
+// Weight generation and transpose for y & partial-z-dimension fixed-point accumulation using LFSR
+// Transpose from (c_out, c_in, w, h) to (pack*h*(c_in/z_unit), z_unit*w, c_out)
+// pack = (stream length + 31) / 32
+// z_unit is the number of input channels to accumulate in OR
 __global__
 void stream_generation_transpose_addyz_variable(
         const int32_t* __restrict__ weight_pos,
@@ -249,6 +266,9 @@ void stream_generation_transpose_addyz_variable(
     }
 }
 
+// Weight generation and transpose for y & partial-z-dimension fixed-point accumulation using LFSR
+// Transpose from (c_out, c_in, w, h) to (pack*c_in, w*h, c_out)
+// pack = (stream length + 31) / 32
 __global__
 void stream_generation_transpose_addz_variable(
         const int32_t* __restrict__ weight_pos,
@@ -328,6 +348,9 @@ void stream_generation_transpose_addz_variable(
     }
 }
 
+// Weight generation and transpose for y-dimension fixed-point accumulation using accurate random generator
+// Transpose from (c_out, c_in, w, h) to (pack*h, c_in*w, c_out)
+// pack = (stream length + 31) / 32
 __global__
 void stream_generation_transpose_add_acc(
         const int32_t* __restrict__ weight_pos,
@@ -393,6 +416,9 @@ void stream_generation_transpose_add_acc(
     }
 }
 
+// Weight generation and transpose for full-OR accumuilation using random generator
+// Transpose from (c_out, c_in, w, h) to (pack, c_in*w*h, c_out)
+// pack = (stream length + 31) / 32
 __global__
 void stream_generation_transpose(
         const int32_t* __restrict__ weight_pos,
@@ -441,68 +467,7 @@ void stream_generation_transpose(
     }
 }
 
-__global__
-void stream_generation_transpose_variable(
-        const int32_t* __restrict__ weight_pos,
-        const int32_t* __restrict__ weight_neg,
-        int32_t* __restrict__ weight_pos_stream,
-        int32_t* __restrict__ weight_neg_stream,
-        int bit_length,
-        int bit_unit,
-        int c_outs,
-        int c_ins,
-        int w_ins,
-        int h_ins,
-        int total,
-        curandState_t* __restrict__ states_pos,
-        curandState_t* __restrict__ states_neg,
-        int seed,
-        int total_width,
-        int load_width,
-        int load_wait) {
-    int index_gen = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride_gen = blockDim.x * gridDim.x;
-
-    curand_init(seed, index_gen, 0, states_pos+index_gen);
-    curand_init(seed+1, index_gen, 0, states_neg+index_gen);
-    int rand_num_pos;
-    int rand_num_neg;
-
-    int bit_packs = (bit_length+31)/32;
-    int cur_width;
-    int cur_bit;
-
-    for(int i=index_gen; i<c_outs * c_ins * w_ins * h_ins; i+=stride_gen) {
-        int c_in=i / (w_ins*h_ins*c_outs);
-        int w_in=(i % (w_ins*h_ins*c_outs)) / (h_ins*c_outs);
-        int h_in=((i % (w_ins*h_ins*c_outs)) % (h_ins*c_outs)) / c_outs;
-        int c_out=i % c_outs;
-        int weight_pos_bin = weight_pos[c_out*c_ins*w_ins*h_ins + c_in*w_ins*h_ins + w_in*h_ins + h_in];
-        int weight_neg_bin = weight_neg[c_out*c_ins*w_ins*h_ins + c_in*w_ins*h_ins + w_in*h_ins + h_in];
-        int weight_pos_actual;
-        int weight_neg_actual;
-        for(int pack=0; pack<bit_packs; pack++) {
-            cur_bit=0;
-            int weight_pos_stream_c = 0;
-            int weight_neg_stream_c = 0;
-            int pack_offset = pack * c_outs * c_ins * w_ins * h_ins;
-            for(int bit=0; bit<bit_unit; bit++) {
-                cur_bit += 1;
-                cur_width = (cur_bit/load_wait + 1)*load_width - 1;
-                if (cur_width > total_width) cur_width=total_width;
-                rand_num_pos = curand(states_pos+index_gen) % bit_length;
-                rand_num_neg = curand(states_neg+index_gen) % bit_length;
-                weight_pos_actual = (weight_pos_bin >> (total_width-cur_width)) << (total_width-cur_width);
-                weight_neg_actual = (weight_neg_bin >> (total_width-cur_width)) << (total_width-cur_width);
-                weight_pos_stream_c = weight_pos_stream_c*2 + (weight_pos_actual>rand_num_pos);
-                weight_neg_stream_c = weight_neg_stream_c*2 + (weight_neg_actual>rand_num_neg);
-            }
-            weight_pos_stream[pack_offset+i] = weight_pos_stream_c;
-            weight_neg_stream[pack_offset+i] = weight_neg_stream_c;
-        }
-    }
-}
-
+// Activation generation + im2col + computation for accurate random generator + y-dimension fixed-point accumulation
 __global__
 void stream_compute_add_acc(
         const int32_t* __restrict__ input_bin,
@@ -557,6 +522,7 @@ void stream_compute_add_acc(
         int i_bin_batch_offset = batch*i_bin_batch_step;
         int i_stream_batch_offset = index_batch*i_stream_batch_step;
         int i_point_batch_offset = index_batch*i_point_batch_step;
+        // Generation
         for(int i=index_gen; i<c_ins * i_w_ins * i_h_ins; i += stride_gen) {
             int input_stream_cur = 0;
             int input_bin_cur = input_bin[i_bin_batch_offset+i];
@@ -581,6 +547,7 @@ void stream_compute_add_acc(
             }
         }
         __syncthreads();
+        // Im2col
         for(int pack=0; pack<bit_packs; pack++) {
             int i_stream_pack_offset = pack*c_ins*i_w_ins*i_h_ins;
             int i_point_pack_offset = pack * (i_w_ins-w_w_ins+1) * (i_h_ins-w_h_ins+1) * c_ins * w_w_ins * w_h_ins;
@@ -597,6 +564,7 @@ void stream_compute_add_acc(
             }
         }
         __syncthreads();
+        // Computation
         matmul_outer(input_point,
                 weight_pos_stream,
                 weight_neg_stream,
@@ -616,142 +584,9 @@ void stream_compute_add_acc(
     }
 }
 
-__global__
-void stream_compute_add_variable(
-        const int32_t* __restrict__ input_bin,
-        int32_t* __restrict__ input_seed_arr,
-        int32_t* __restrict__ input_stream,
-        int32_t* __restrict__ input_point,
-        const int32_t* __restrict__ weight_pos_stream,
-        const int32_t* __restrict__ weight_neg_stream,
-        int32_t* __restrict__ output_stream,
-        int bit_length,
-        int batches,
-        int c_ins,
-        int i_w_ins,
-        int i_h_ins,
-        int c_outs,
-        int w_w_ins,
-        int w_h_ins,
-        int i_kernel_size,
-        int w_kernel_size,
-        int total_width,
-        int load_width,
-        int load_wait
-        ) {
-    int bit_packs = (bit_length+31)/32;
-    int (*lfsr)(int);
-    int bit_unit = 32;
-    switch(bit_length) {
-    case 8:
-        lfsr=&d_lfsr_3;
-        bit_unit = 8;
-        break;
-    case 16:
-        lfsr=&d_lfsr_4;
-        bit_unit = 16;
-        break;
-    case 32:
-        lfsr=&d_lfsr_5;
-        break;
-    case 64:
-        lfsr=&d_lfsr_6;
-        break;
-    case 128:
-        lfsr=&d_lfsr_7;
-        break;
-    case 256:
-        lfsr=&d_lfsr_8;
-        break;
-    }
-
-    const int inner_size = c_ins*w_w_ins;
-    const int cin_size = (i_w_ins-w_w_ins+1)*(i_h_ins-w_h_ins+1);
-    const int cout_size = c_outs;
-
-    const int o_cout_step = cin_size;
-
-    const int i_pw_step = inner_size * cin_size;
-    const int i_flatten_step = cin_size;
-
-    const int w_pw_step = inner_size * cout_size;
-    const int w_flatten_step = cout_size;
-    const int o_batch_step = c_outs * cin_size;
-    const int i_bin_batch_step = c_ins * i_w_ins * i_h_ins;
-    const int i_stream_batch_step = bit_packs * c_ins * i_w_ins * i_h_ins;
-    const int i_point_batch_step = bit_packs * cin_size * c_ins * w_w_ins * w_h_ins;
-
-    int cur_width;
-    int cur_bit;
-
-    int index_gen = threadIdx.x;
-    int stride_gen = blockDim.x;
-    int index_batch = blockIdx.x;
-    int stride_batch = gridDim.x;
-    for(int batch=index_batch; batch<batches; batch+=stride_batch) {
-        int o_batch_offset = batch*o_batch_step;
-        int i_bin_batch_offset = batch*i_bin_batch_step;
-        int i_stream_batch_offset = index_batch*i_stream_batch_step;
-        int i_point_batch_offset = index_batch*i_point_batch_step;
-        int input_seed=0;
-        for(int i=index_gen; i<c_ins * i_w_ins * i_h_ins; i += stride_gen) {
-            input_seed_arr[i] = (input_seed + i)%(bit_length-1) + 1;
-        }
-        for(int i=index_gen; i<c_ins * i_w_ins * i_h_ins; i += stride_gen) {
-            int input_seed_cur = input_seed_arr[i];
-            int input_stream_cur = 0;
-            int input_bin_cur = input_bin[i_bin_batch_offset+i];
-            int input_bin_actual;
-            cur_bit=0;
-            for(int pack=0; pack<bit_packs; pack++) {
-                int i_stream_pack_offset = pack*c_ins*i_w_ins*i_h_ins;
-                for(int bit=0; bit<bit_unit; bit++) {
-                    cur_bit+=1;
-                    cur_width = (cur_bit/load_wait + 1)*load_width - 1;
-                    if (cur_width > total_width) cur_width=total_width;
-                    input_bin_actual = (input_bin_cur >> (total_width-cur_width)) << (total_width-cur_width);
-                    input_seed_cur = (*lfsr)(input_seed_cur);
-                    input_stream_cur = (input_stream_cur*2) + (input_bin_actual > input_seed_cur);
-                }
-                input_stream[i_stream_batch_offset+i_stream_pack_offset+i] = input_stream_cur;
-            }
-        }
-        __syncthreads();
-        for(int pack=0; pack<bit_packs; pack++) {
-            int i_stream_pack_offset = pack*c_ins*i_w_ins*i_h_ins;
-            int i_point_pack_offset = pack * (i_w_ins-w_w_ins+1) * (i_h_ins-w_h_ins+1) * c_ins * w_w_ins * w_h_ins;
-            for(int i=index_gen; i<w_h_ins*(i_w_ins-w_w_ins+1)*(i_h_ins-w_h_ins+1)*c_ins*w_w_ins; i+= stride_gen) {
-                int h_in = i / ((i_w_ins-w_w_ins+1) * (i_h_ins-w_h_ins+1) * c_ins * w_w_ins);
-                int flatten_in = (i % ((i_w_ins-w_w_ins+1) * (i_h_ins-w_h_ins+1) * c_ins * w_w_ins)) / ((i_w_ins-w_w_ins+1) * (i_h_ins-w_h_ins+1));
-                int input_cin = flatten_in / w_w_ins;
-                int input_w_win = flatten_in % w_w_ins;
-                int flatten = i % ((i_w_ins-w_w_ins+1) * (i_h_ins-w_h_ins+1));
-                int input_w = flatten / (i_h_ins-w_h_ins+1);
-                int input_h = flatten % (i_h_ins-w_h_ins+1);
-
-                input_point[i_point_batch_offset+i_point_pack_offset+i] = input_stream[i_stream_batch_offset+i_stream_pack_offset + input_cin*i_w_ins*i_h_ins + (input_w+input_w_win)*i_h_ins + (input_h+h_in)];
-            }
-        }
-        __syncthreads();
-        matmul_outer(input_point,
-                weight_pos_stream,
-                weight_neg_stream,
-                output_stream,
-                index_gen,
-                bit_packs*w_h_ins,
-                i_pw_step,
-                w_pw_step,
-                i_flatten_step,
-                w_flatten_step,
-                i_kernel_size,
-                w_kernel_size,
-                inner_size,
-                i_point_batch_offset,
-                o_batch_offset,
-                o_cout_step);
-    }
-}
-
+// Activation generation + im2col + computation for LFSR generator + y-dimension fixed-point accumulation
+// This is the only function doing direct convolution instead of im2col method, and achieves ~2X throughput.
+// This will be expanded later
 __global__
 void stream_compute_add_direct_variable(
         const int32_t* __restrict__ input_bin,
@@ -1126,7 +961,6 @@ void stream_compute_add_direct_variable(
                     __syncthreads();
                 }
                 // Process the remaining input grid
-
                 for(; i_out_size-input_dim<i_flatten_step; i_out_size+=i_kernel_size){
                     int input_w = i_out_size / (i_h_ins-w_h_ins+1);
                     int input_h = i_out_size % (i_h_ins-w_h_ins+1);
@@ -1169,113 +1003,7 @@ void stream_compute_add_direct_variable(
     }
 }
 
-__global__
-void stream_compute_transpose_variable(
-        const int32_t* __restrict__ input_bin,
-        int32_t* __restrict__ input_seed_arr,
-        int32_t* __restrict__ input_stream,
-        int32_t* __restrict__ input_point,
-        int bit_length,
-        int cur_batch,
-        int batches,
-        int c_ins,
-        int i_w_ins,
-        int i_h_ins,
-        int c_outs,
-        int w_w_ins,
-        int w_h_ins,
-        int i_kernel_size,
-        int w_kernel_size,
-        int total_width,
-        int load_width,
-        int load_wait
-        ) {
-    int bit_packs = (bit_length+31)/32;
-    int (*lfsr)(int);
-    int bit_unit = 32;
-    switch(bit_length) {
-    case 8:
-        lfsr=&d_lfsr_3;
-        bit_unit = 8;
-        break;
-    case 16:
-        lfsr=&d_lfsr_4;
-        bit_unit = 16;
-        break;
-    case 32:
-        lfsr=&d_lfsr_5;
-        break;
-    case 64:
-        lfsr=&d_lfsr_6;
-        break;
-    case 128:
-        lfsr=&d_lfsr_7;
-        break;
-    case 256:
-        lfsr=&d_lfsr_8;
-        break;
-    }
-
-    const int cin_size = (i_w_ins-w_w_ins+1)*(i_h_ins-w_h_ins+1);
-
-    const int i_bin_batch_step = c_ins * i_w_ins * i_h_ins;
-    const int i_stream_batch_step = bit_packs * c_ins * i_w_ins * i_h_ins;
-    const int i_point_batch_step = bit_packs * cin_size * c_ins * w_w_ins * w_h_ins;
-
-    int cur_width;
-    int cur_bit;
-
-    int index_gen = threadIdx.x;
-    int stride_gen = blockDim.x;
-    int index_batch = blockIdx.x;
-    int stride_batch = gridDim.x;
-    int batch=cur_batch+index_batch;
-    if(batch<batches) {
-        int i_bin_batch_offset = batch*i_bin_batch_step;
-        int i_stream_batch_offset = index_batch*i_stream_batch_step;
-        int i_point_batch_offset = index_batch*i_point_batch_step;
-        int input_seed=0;
-        for(int i=index_gen; i<c_ins * i_w_ins * i_h_ins; i += stride_gen) {
-            input_seed_arr[i] = (input_seed + i)%(bit_length-1) + 1;
-        }
-        for(int i=index_gen; i<c_ins * i_w_ins * i_h_ins; i += stride_gen) {
-            int input_seed_cur = input_seed_arr[i];
-            int input_stream_cur = 0;
-            int input_bin_cur = input_bin[i_bin_batch_offset+i];
-            int input_bin_actual;
-            cur_bit=0;
-            for(int pack=0; pack<bit_packs; pack++) {
-                int i_stream_pack_offset = pack*c_ins*i_w_ins*i_h_ins;
-                for(int bit=0; bit<bit_unit; bit++) {
-                    cur_bit+=1;
-                    cur_width = (cur_bit/load_wait + 1)*load_width - 1;
-                    if (cur_width > total_width) cur_width=total_width;
-                    input_bin_actual = (input_bin_cur >> (total_width-cur_width)) << (total_width-cur_width);
-                    input_seed_cur = (*lfsr)(input_seed_cur);
-                    input_stream_cur = (input_stream_cur*2) + (input_bin_actual > input_seed_cur);
-                }
-                input_stream[i_stream_batch_offset+i_stream_pack_offset+i] = input_stream_cur;
-            }
-        }
-        __syncthreads();
-        for(int pack=0; pack<bit_packs; pack++) {
-            int i_stream_pack_offset = pack*c_ins*i_w_ins*i_h_ins;
-            int i_point_pack_offset = pack * (i_w_ins-w_w_ins+1) * (i_h_ins-w_h_ins+1) * c_ins * w_w_ins * w_h_ins;
-            for(int i=index_gen; i<w_h_ins*(i_w_ins-w_w_ins+1)*(i_h_ins-w_h_ins+1)*c_ins*w_w_ins; i+= stride_gen) {
-                int h_in = i / ((i_w_ins-w_w_ins+1) * (i_h_ins-w_h_ins+1) * c_ins * w_w_ins);
-                int flatten_in = (i % ((i_w_ins-w_w_ins+1) * (i_h_ins-w_h_ins+1) * c_ins * w_w_ins)) / ((i_w_ins-w_w_ins+1) * (i_h_ins-w_h_ins+1));
-                int input_cin = flatten_in / w_w_ins;
-                int input_w_win = flatten_in % w_w_ins;
-                int flatten = i % ((i_w_ins-w_w_ins+1) * (i_h_ins-w_h_ins+1));
-                int input_w = flatten / (i_h_ins-w_h_ins+1);
-                int input_h = flatten % (i_h_ins-w_h_ins+1);
-
-                input_point[i_point_batch_offset+i_point_pack_offset+i] = input_stream[i_stream_batch_offset+i_stream_pack_offset + input_cin*i_w_ins*i_h_ins + (input_w+input_w_win)*i_h_ins + (input_h+h_in)];
-            }
-        }
-    }
-}
-
+// Activation generation + im2col + computation for LFSR generator + y + partial-z-dimension fixed-point accumulation
 __global__
 void stream_compute_addyz_variable(
         const int32_t* __restrict__ input_bin,
@@ -1372,7 +1100,6 @@ void stream_compute_addyz_variable(
                 input_stream[i_stream_batch_offset+i_stream_pack_offset+i] = input_stream_cur;
             }
         }
-
         __syncthreads();
         for(int pack=0; pack<bit_packs; pack++) {
             int i_stream_pack_offset = pack*z_packs*z_units*i_w_ins*i_h_ins;
@@ -1391,7 +1118,6 @@ void stream_compute_addyz_variable(
             }
         }
         __syncthreads();
-
         matmul_outer(input_point,
                 weight_pos_stream,
                 weight_neg_stream,
@@ -1411,6 +1137,7 @@ void stream_compute_addyz_variable(
     }
 }
 
+// Activation generation + im2col + computation for LFSR generator + z-dimension fixed-point accumulation
 __global__
 void stream_compute_addz_variable(
         const int32_t* __restrict__ input_bin,
@@ -1543,6 +1270,7 @@ void stream_compute_addz_variable(
     }
 }
 
+// Activation generation + im2col + computation for random generator + full or accumulation
 __global__
 void stream_compute_or(
         const int32_t* __restrict__ input_bin,
@@ -1641,6 +1369,7 @@ void stream_compute_or(
     }
 }
 
+// Activation generation + im2col + computation for LFSR generator + y-dimesnion fixed-point accumulation. Generation is done after im2col
 __global__
 void stream_compute_add_im2col_variable(
         const int32_t* __restrict__ input_bin,
@@ -1767,6 +1496,7 @@ void stream_compute_add_im2col_variable(
     }
 }
 
+// Activation generation + im2col + computation for LFSR generator + z-dimesnion fixed-point accumulation. Generation is done after im2col
 __global__
 void stream_compute_addz_im2col_variable(
         const int32_t* __restrict__ input_bin,
@@ -1893,6 +1623,7 @@ void stream_compute_addz_im2col_variable(
     }
 }
 
+// Activation generation + im2col + computation for random generator + full-or accumulation. Generation is done after im2col
 __global__
 void stream_compute_or_im2col(
         const int32_t* __restrict__ input_bin,
@@ -1997,6 +1728,7 @@ void stream_compute_or_im2col(
     }
 }
 
+// Conv2d with LFSR generation + y-dimension fixed-point accumulation
 torch::Tensor conv2d_add_partial_direct_variable_cuda(torch::Tensor input,
         torch::Tensor weight_pos,
         torch::Tensor weight_neg,
@@ -2101,6 +1833,7 @@ torch::Tensor conv2d_add_partial_direct_variable_cuda(torch::Tensor input,
     return output_tensor;
 }
 
+// Conv2d with accurate random generation + y-dimension fixed-point accumulation
 torch::Tensor conv2d_add_partial_cuda_acc(torch::Tensor input,
         torch::Tensor weight_pos,
         torch::Tensor weight_neg,
@@ -2234,6 +1967,7 @@ torch::Tensor conv2d_add_partial_cuda_acc(torch::Tensor input,
     return output_tensor;
 }
 
+// Conv2d with LFSR generation + y & partial-z-dimension fixed-point accumulation
 torch::Tensor conv2d_addyz_variable_cuda(torch::Tensor input,
         torch::Tensor weight_pos,
         torch::Tensor weight_neg,
@@ -2381,6 +2115,7 @@ torch::Tensor conv2d_addyz_variable_cuda(torch::Tensor input,
     return output_tensor;
 }
 
+// Conv2d with LFSR generation + z-dimension fixed-point accumulation
 torch::Tensor conv2d_addz_variable_cuda(torch::Tensor input,
         torch::Tensor weight_pos,
         torch::Tensor weight_neg,
@@ -2413,7 +2148,7 @@ torch::Tensor conv2d_addz_variable_cuda(torch::Tensor input,
         pos_seed_arr[i] = (pos_seed + i)%(bit_length-1) + 1;
         neg_seed_arr[i] = (neg_seed + i)%(bit_length-1) + 1;
     }
-    stream_generation_transpose_add_variable<<<numBlocks_gen, threads>>>(
+    stream_generation_transpose_addz_variable<<<numBlocks_gen, threads>>>(
             weight_pos.data_ptr<int32_t>(),
             weight_neg.data_ptr<int32_t>(),
             weight_pos_stream,
@@ -2491,7 +2226,7 @@ torch::Tensor conv2d_addz_variable_cuda(torch::Tensor input,
         w_kernel = 512;
     }
     if (im2col) {
-        stream_compute_add_im2col_variable<<<numBlocks_comp, threads_c>>>(
+        stream_compute_addz_im2col_variable<<<numBlocks_comp, threads_c>>>(
                 input.data_ptr<int32_t>(),
                 input_seed_arr,
                 input_point,
@@ -2514,7 +2249,7 @@ torch::Tensor conv2d_addz_variable_cuda(torch::Tensor input,
                 );
     }
     else {
-        stream_compute_add_variable<<<numBlocks_comp, threads_c>>>(
+        stream_compute_addz_variable<<<numBlocks_comp, threads_c>>>(
                 input.data_ptr<int32_t>(),
                 input_seed_arr,
                 input_stream,
@@ -2549,6 +2284,7 @@ torch::Tensor conv2d_addz_variable_cuda(torch::Tensor input,
     return output_tensor;
 }
 
+// Conv2d with random generation + full OR accumulation
 torch::Tensor conv2d_or_cuda(torch::Tensor input,
         torch::Tensor weight_pos,
         torch::Tensor weight_neg,

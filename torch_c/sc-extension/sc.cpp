@@ -5,12 +5,9 @@
 
 namespace F = torch::nn::functional;
 
-inline int popcount8b(uint8_t x) {
-    x -= (x >> 1) & 0x55;
-    x = (x & 0x33) + ((x >> 2) & 0x33);
-    x = (x + (x>>4)) & 0x0f;
-    return x;
-}
+/*
+ * Accelerated CPU implementation. Only y-dimension fixed-point accumulation with LFSR generator is supported right now
+ */
 
 void matmul_outer(int* input, int* weight_pos, int* weight_neg, int* output, int add_size, int inner_size, int cin_size, int cout_size) {
     int o_cout_step = cin_size;
@@ -22,12 +19,15 @@ void matmul_outer(int* input, int* weight_pos, int* weight_neg, int* output, int
     int w_flatten_step = cout_size;
     
     for(int pw=0; pw<add_size; pw++) {
+    	// Different pw is added together. This includes different 32-bit sections in the same stream and parts of accumulation done using fixed point
         int32_t* input_pw = input + pw * i_pw_step;
         int32_t* weight_pos_pw = weight_pos + pw * w_pw_step;
         int32_t* weight_neg_pw = weight_neg + pw * w_pw_step;
         int i_out_size = 0;
 
+        // AVX512 implementation
 #ifdef __AVX512F__
+        // 4-way unroll, 16x4 outputs
         int32_t output_pos_16_0[16];
         int32_t output_pos_16_1[16];
         int32_t output_pos_16_2[16];
@@ -37,6 +37,7 @@ void matmul_outer(int* input, int* weight_pos, int* weight_neg, int* output, int
         int32_t output_neg_16_2[16];
         int32_t output_neg_16_3[16];
         for (; i_out_size+15<cin_size; i_out_size+=16) {
+        	// 512 = 16x32
             __m512i input_16_v;
             __m512i weight_pos_16_v;
             __m512i weight_neg_16_v;
@@ -127,8 +128,9 @@ void matmul_outer(int* input, int* weight_pos, int* weight_neg, int* output, int
             }
         }
 #endif
-        
+        // AVX2 implementation
 #ifdef __AVX2__
+        // 4-way unroll, 8x4 outputs
         int32_t output_pos_8_0[8];
         int32_t output_pos_8_1[8];
         int32_t output_pos_8_2[8];
@@ -228,7 +230,7 @@ void matmul_outer(int* input, int* weight_pos, int* weight_neg, int* output, int
             }
         }
 #endif
-        
+        // Leftover outputs + compatibility code
         for (; i_out_size<i_flatten_step; i_out_size++) {
             int w_cout=0;
             int input_v;
@@ -256,6 +258,7 @@ void matmul_outer(int* input, int* weight_pos, int* weight_neg, int* output, int
     }
 }
 
+// LFSR generator functions
 template <class T>
 inline T lfsr_8_s(T value) {
     return ((value/128)+(value/32)%2+(value/16)%2+(value/8)%2)%2+2*(value%128);
@@ -287,6 +290,10 @@ inline T lfsr_3_s(T value) {
 }
 
 at::Tensor conv2d_add_partial_new(torch::Tensor input, torch::Tensor weight, int bit_length, at::IntArrayRef padding, at::IntArrayRef stride) {
+	/*
+	 * Conv2d with fixed-point accumulation in y dimension
+	 */
+	// Input padding and scaling
     auto weight_size = weight.sizes();
     auto input_pad = F::pad(input, F::PadFuncOptions({padding[0], padding[0], padding[1], padding[1]}));
     auto compare_type = torch::kInt32;
@@ -300,6 +307,8 @@ at::Tensor conv2d_add_partial_new(torch::Tensor input, torch::Tensor weight, int
     int h_weight = weight_size[3];
     int bit_packs = (bit_length+31)/32;
     int (*lfsr)(int);
+    // Streams are processed in groups of 32-bits. If stream length is smaller than 32, it will still be processed using 32-bit ints.
+    // LFSR length is tied to stream length. Stream length = 2**LFSR length
     int bit_unit = 32;
     switch(bit_length) {
     case 8:
@@ -337,6 +346,7 @@ at::Tensor conv2d_add_partial_new(torch::Tensor input, torch::Tensor weight, int
         neg_seed_arr[i] = (neg_seed + i)%(bit_length-1) + 1;
     }
 
+    // Weight generation + im2col generation on the weight side. omp helps very little here, and overall this part takes little time
     for(int pack=0; pack<bit_packs; pack++) {
         int32_t* weight_pos_pack = weight_pos_stream_new + pack * weight_size[0] * weight_size[1] * weight_size[2] * weight_size[3];
         int32_t* weight_neg_pack = weight_neg_stream_new + pack * weight_size[0] * weight_size[1] * weight_size[2] * weight_size[3];
@@ -385,7 +395,10 @@ at::Tensor conv2d_add_partial_new(torch::Tensor input, torch::Tensor weight, int
     int inner_size = weight_size[1] * weight_size[2];
     int cin_size = (input_size[2]-weight_size[2]+1) * (input_size[3]-weight_size[3]+1);
     int cout_size = weight_size[0];
+
     #pragma omp parallel for
+    // By default this only uses half the number of threads in a CPU with hyperthreading/simultaneous multithreading.
+    // Specify the max number of threads if you want to take advantage of HT/SMT
     for(int batch=0; batch<input_size[0]; batch++) {
         int32_t* output_batch = output_point_flat + batch*o_batch_step;
         int32_t* input_bin_batch = input_bin_point + batch*i_bin_batch_step;
@@ -413,7 +426,6 @@ at::Tensor conv2d_add_partial_new(torch::Tensor input, torch::Tensor weight, int
                         int input_seed_cur = input_seed_arr[input_seed_ind];
                         int input_stream_cur = 0;
                         int input_bin_cur = input_bin_win[h_in];
-//                        std::cout << h_in << std::endl;
                         for(int bit=0; bit<bit_unit; bit++) {
                             input_seed_cur = (*lfsr)(input_seed_cur);
                             input_stream_cur = (input_stream_cur*2) + (input_bin_cur > input_seed_cur);

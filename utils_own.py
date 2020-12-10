@@ -14,6 +14,9 @@ from sys import exit
 
 scale_factor = 128.0
 
+'''
+Auxilliary functions mostly for half-precision training
+'''
 def set_grad(params, params_with_grad):
     for param, param_w_grad in zip(params, params_with_grad):
         if param.grad is None:
