@@ -48,3 +48,15 @@ This trains a 4-layer CNN with partial binary accumulation using linear feedback
 ```
 python main_conv.py -h
 ```
+
+Please consider citing our work if you find this useful:
+```
+@INPROCEEDINGS{tianmu2021geo,
+  author={Li, Tianmu and Romaszkan, Wojciech and Pamarti, Sudhakar and Gupta, Puneet},
+  booktitle={2021 Design, Automation & Test in Europe Conference & Exhibition (DATE)},
+  title={GEO: Generation and Execution Optimized Stochastic Computing Accelerator for Neural Networks},
+  year={2021},
+  pages={689-694},
+  doi={10.23919/DATE51398.2021.9473911}
+}
+```
